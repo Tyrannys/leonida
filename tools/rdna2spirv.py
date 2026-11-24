@@ -259,6 +259,7 @@ class Gen:
         self.stage = stage
         self.hoist_reg_ptrs = hoist_reg_ptrs
         self.reg_ptrs = {}
+        self.vcc_hi_sgpr = False   # wave32: %vcc_hi is %sgpr[107] (vcc_hi_as_sgpr)
         self.cache_active = cache_active
         self.exec_static_true = False
         self._active_ssa = None
@@ -414,6 +415,12 @@ class Gen:
 
     def emit(self, s):
         self.body.append("         " + s)
+        if getattr(self, "vcc_hi_sgpr", False) and s.startswith("OpStore %vcc_hi "):
+            # %vcc_hi is SGPR 107 here: a direct store (the high half of a 64-bit vcc write) is an SGPR write.
+            self.sgpr_imm.pop(107, None)
+            self.x_tok.pop(("sgpr", 107), None)
+            if self.desc_cache:
+                self.desc_cache = {k: v for k, v in self.desc_cache.items() if not (k[0] <= 107 < k[0] + k[1])}
         if s.startswith("OpStore %active "):
             if self.exec_static_true:
                 raise RuntimeError(f"OpStore %active emitted with exec_static_true: {s}")
@@ -15877,7 +15884,7 @@ def assemble(gen):
           "%vgpr = OpVariable %_ptr_Function_arr_v Function %null_v",
           "%sgpr = OpVariable %_ptr_Function_arr_s Function %null_s",
           "%vcc = OpVariable %_ptr_Function_uint Function %c0", "%m0 = OpVariable %_ptr_Function_uint Function %c0",
-          "%vcc_hi = OpVariable %_ptr_Function_uint Function %c0",
+          *([] if gen.vcc_hi_sgpr else ["%vcc_hi = OpVariable %_ptr_Function_uint Function %c0"]),
           "%scc = OpVariable %_ptr_Function_uint Function %c0",
           *(["%mode_r16 = OpVariable %_ptr_Function_uint Function %c0"] if gen.round_mode else []),
           "%active = OpVariable %_ptr_Function_bool Function %true",
@@ -17025,7 +17032,46 @@ def restore_vcc_tuples(insns, blob, code_start, code_end):
         return insns
     spans = [(r["pc"], r["pc"] + len(r["enc"]) // 2) for r in restored]
     kept = [i for i in insns if not any(i["pc"] < hi and i["pc"] + len(i["enc"]) // 2 > lo for lo, hi in spans)]
+    # The junk llvm-mc printed from a restored instruction's second word can run past it and swallow the first word
+    # of the next real instruction (a VOP with a literal, say), which llvm-mc then never prints. Dropping the junk
+    # leaves that gap, so decode forward from each restored instruction until the stream meets an instruction that
+    # is already there again, dropping any listed instruction the decoded ones overlap (misaligned junk).
+    # Only instructions whose printed bytes match the blob count as re-synced: a "normalized" one is junk llvm-mc
+    # anchored at the current position (the cascade after the rejected word), not a real instruction start.
+    starts = {i["pc"] for i in kept if not i.get("normalized")}
+    for r in list(restored):
+        at = r["pc"] + len(r["enc"]) // 2
+        for _ in range(8):
+            if at in starts or at + 4 > stop:
+                break
+            found = rdna2_decode.decode_bytes(blob[at:at + 20])["insns"][:1]
+            if not found or found[0]["pc"] != 0:
+                break
+            ins = found[0]
+            ins["pc"] = at
+            end = at + len(ins["enc"]) // 2
+            kept = [i for i in kept if not (i["pc"] < end and i["pc"] + len(i["enc"]) // 2 > at)]
+            starts = {i["pc"] for i in kept if not i.get("normalized")}
+            restored.append(ins)
+            at = end
     return sorted(kept + restored, key=lambda i: i["pc"])
+
+
+def vcc_hi_as_sgpr(insns):
+    """In wave32 code VCC is vcc_lo alone, so vcc_hi is SGPR 107 like any other. The pipeline library's compute
+    programs use it as one, including as a v_cmp_*_e64 lane-mask destination (694 of its 2,684 programs). Naming it
+    s107 lets the lane-mask analysis and mask_dst treat it as an SGPR. The high word of a 64-bit vcc write still goes
+    to %vcc_hi, which translate() makes the %sgpr[107] element in wave32, so both name one register."""
+    for i in insns:
+        for a in i["args"]:
+            if a.get("k") == "special" and a.get("t") == "vcc_hi":
+                t = {k: v for k, v in a.items() if k != "t"}
+                a.clear()
+                a.update(t, k="sgpr", r=107, n=1)
+                a.setdefault("neg", False)
+                a.setdefault("abs", False)
+            elif a.get("k") == "slist" and "vcc_hi" in a["r"]:
+                a["r"] = [107 if r == "vcc_hi" else r for r in a["r"]]
 
 
 def output_signature(path, name):
@@ -17350,6 +17396,12 @@ def translate(path):
         g.wave64 = False
     else:
         g.wave64 = code_w64 or stage == "ms"   # NGG mesh shaders here are wave64 (thread = wave id * 64 + lane)
+    if not g.wave64:
+        # Wave32: VCC is vcc_lo alone and vcc_hi is SGPR 107. Name it so in the operands, and make %vcc_hi (where a
+        # 64-bit vcc write or an SMEM tuple puts its high word) the %sgpr[107] element, so every path shares it.
+        vcc_hi_as_sgpr(insns)
+        g.vcc_hi_sgpr = True
+        g.reg_ptrs[("sgpr", 107)] = "%vcc_hi"
     if stage == "gs":
         ins_by_reg = {}
         for reg, mask, sv, ctype in input_signature(path, info["name"]):
