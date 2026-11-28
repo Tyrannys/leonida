@@ -123,8 +123,9 @@ void submit(PipelineCompiler& pool, Log& log, Gate* gate, const void* owner, con
 }
 
 void test_pool_settings() {
+    // Large builds: 2 at once by default, the most before the pool (7 at once stalled a story load under Wine, #1608).
     auto pool = rt::d3d12::compile_pool(nullptr, nullptr, 16, false);
-    EXPECT(pool.threads == 8 && pool.heavy == 7);
+    EXPECT(pool.threads == 8 && pool.heavy == 2);
     pool = rt::d3d12::compile_pool(nullptr, nullptr, 32, false);
     EXPECT(pool.threads == 8);
     pool = rt::d3d12::compile_pool(nullptr, nullptr, 6, false);
@@ -150,7 +151,21 @@ void test_pool_settings() {
     pool = rt::d3d12::compile_pool(L"6", L"3", 16, true);  // an explicit count wins
     EXPECT(pool.heavy == 3);
     pool = rt::d3d12::compile_pool(L"six", L"x", 16, false);
-    EXPECT(!pool.threads_valid && !pool.heavy_valid && pool.threads == 8 && pool.heavy == 7);
+    EXPECT(!pool.threads_valid && !pool.heavy_valid && pool.threads == 8 && pool.heavy == 2);
+    pool = rt::d3d12::compile_pool(L"8", L"7", 16, false);  // the old default, asked for
+    EXPECT(pool.threads == 8 && pool.heavy == 7);
+    pool = rt::d3d12::compile_pool(L"8", nullptr, 16, true);
+    EXPECT(pool.heavy == 1);
+    // The pool follows the processors the process may run on, not the machine's count.
+    EXPECT(rt::d3d12::affinity_processors(0xFFFFull, 32) == 16);
+    EXPECT(rt::d3d12::affinity_processors(0x0Full, 32) == 4);
+    EXPECT(rt::d3d12::affinity_processors(~0ull, 128) == 64);
+    EXPECT(rt::d3d12::affinity_processors(0, 12) == 12);  // not read: the machine's count
+    pool = rt::d3d12::compile_pool(nullptr, nullptr, rt::d3d12::affinity_processors(0x0Full, 32), false);
+    EXPECT(pool.threads == 2 && pool.heavy == 1);  // four processors of 32: two workers, not eight
+    pool = rt::d3d12::compile_pool(nullptr, nullptr, rt::d3d12::affinity_processors(0x3Full, 32), false);
+    EXPECT(pool.threads == 3 && pool.heavy == 2);
+    EXPECT(rt::d3d12::process_processors() >= 1);
 }
 
 void test_long_build_does_not_hold_up_a_small_demanded_one() {

@@ -2956,13 +2956,16 @@ submitting thread; at the maintainers' decision it was replaced by this one when
   targets give (`request_pipeline_build`). A compute build the compile helper is still making (`LEONIDA_COMPILE_HELPER`)
   publishes nothing, so its next use asks again.
 - **Compile workers** (RT-ASYNC-COMPILE-POOL, after MoonEyes' design in #2077). The jobs above, the compute warm-up
-  and the cache checkpoint run on `LEONIDA_COMPILE_THREADS` workers (half the logical processors, 2 to 8). With one
+  and the cache checkpoint run on `LEONIDA_COMPILE_THREADS` workers (half the processors in the process's affinity mask, 2 to 8). With one
   worker a driver compile of minutes held every pipeline a submission asked for behind it, and their draws and
   dispatches were skipped meanwhile. A worker now takes the most urgent job it may: demanded builds first, in the
   order they came, then warm-ups by module size, then the checkpoint, which waits until no worker compiles. Large
   builds (compute over 128 KiB, graphics of 1 MiB or more) and warm-ups together take at most threads-1 workers, so
   one is always free for a small demanded build; at most `LEONIDA_COMPILE_HEAVY_MAX` large builds run at once (default
-  threads-1, 1 with `LEONIDA_SERIAL_BIG_COMPILES=1`), each still within the memory gate; warm-ups run one at a time,
+  2, the most the general and graphics-only workers could run before the pool, 1 with two workers or
+  `LEONIDA_SERIAL_BIG_COMPILES=1`), each still within the memory gate. The default was threads-1: with 8 workers
+  under Wine the story load stalled at about 5,100 submissions until the title's 300 s guard fired, while one worker
+  lived (z3r0rc, #1608), and native boots showed the same knee with troughs of 15-60 s; warm-ups run one at a time,
   as before, and none starts while a demanded build is queued or running, since each holds the compile gate for its
   whole create (MoonEyes measured in #1608 that with the gate on, submissions waited 142 s in all behind warm-ups of
   about 800 KB, and that with `LEONIDA_COMPILE_GATE=0` the same boot reached game state 3); and a PSO has one build

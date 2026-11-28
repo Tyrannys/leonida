@@ -236,16 +236,23 @@ private:
 
 
 // How many compile workers PipelineCompiler runs, and how many of them may build a large module at once.
-//   LEONIDA_COMPILE_THREADS=<n>: n workers (1..64). Unset: half the logical processors, 2 at least and 8 at most. 1: one
-//     worker for every job plus the graphics-only one (LEONIDA_GRAPHICS_COMPILE_WORKER), the layout before the pool.
+//   LEONIDA_COMPILE_THREADS=<n>: n workers (1..64). Unset: half the processors this process may run on (its affinity
+//     mask, not the machine's count), 2 at least and 8 at most. 1: one worker for every job plus the graphics-only one
+//     (LEONIDA_GRAPHICS_COMPILE_WORKER), the layout before the pool.
 //   LEONIDA_COMPILE_HEAVY_MAX=<n>: at most n large builds (compute modules over 128 KiB, graphics pipelines of
-//     PipelineCompiles::large_spirv_bytes or more) at once, 1..threads-1. Unset: threads-1, or 1 with
-//     LEONIDA_SERIAL_BIG_COMPILES=1. Large builds still take their place at the memory gate (big_compile_gate) too.
+//     PipelineCompiles::large_spirv_bytes or more) at once, 1..threads-1. Unset: 2 (1 with two workers), the most the
+//     general and graphics-only workers could run before the pool, or 1 with LEONIDA_SERIAL_BIG_COMPILES=1. Large builds
+//     still take their place at the memory gate (big_compile_gate) too. The default was threads-1 (7 with 8 workers):
+//     under Wine, the story load then stalled at about 5,100 submissions until the title's 300 s guard fired, and one
+//     worker lived (z3r0rc, #1608); native Windows boots showed the same knee, with troughs of 15-60 s.
 // With two workers or more, large and speculative builds (warm-ups) together take at most threads-1 of them, so one
 // worker is always free for a small build a submission waits for. Warm-ups run one at a time, as on the single worker,
 // and none starts while a demanded build is queued or running: each holds the compile gate for its whole create, and a
 // submission waits there for every create in flight (MoonEyes, #1608: with the gate on, submissions waited 142 s in all
 // behind warm-ups of about 800 KB, 5-13.5 s each).
+// The default heavy count (CompilePool::heavy without LEONIDA_COMPILE_HEAVY_MAX).
+inline constexpr unsigned kDefaultHeavyCompiles = 2;
+
 struct CompilePool {
     unsigned threads = 1;
     unsigned heavy = 1;          // large builds at once
@@ -275,12 +282,29 @@ inline CompilePool compile_pool(const wchar_t* threads_text, const wchar_t* heav
         else pool.threads_valid = false;
     }
     const unsigned most = pool.threads > 1 ? pool.threads - 1 : 1;
-    pool.heavy = serial_big ? 1 : most;
+    pool.heavy = serial_big ? 1 : (std::min)(kDefaultHeavyCompiles, most);
     if (heavy_text && *heavy_text) {
         if (parse_compile_count(heavy_text, value)) pool.heavy = std::clamp(value, 1u, most);
         else pool.heavy_valid = false;
     }
     return pool;
+}
+
+// The processors in an affinity mask; `fallback` (the machine's count) when the mask is empty, as when it could not be
+// read.
+inline unsigned affinity_processors(std::uint64_t mask, unsigned fallback) {
+    unsigned count = 0;
+    for (; mask; mask &= mask - 1) ++count;
+    return count ? count : fallback;
+}
+
+// The processors this process may run on: a process limited to some of them (start /affinity, a job object, or a
+// container's CPU set as Wine reports it) sizes the pool from those, not from the machine's count.
+inline unsigned process_processors() {
+    DWORD_PTR process = 0, system = 0;
+    const unsigned machine = std::thread::hardware_concurrency();
+    if (!GetProcessAffinityMask(GetCurrentProcess(), &process, &system)) return machine;
+    return affinity_processors(static_cast<std::uint64_t>(process), machine);
 }
 
 inline CompilePool compile_pool_from_environment() {
@@ -292,7 +316,7 @@ inline CompilePool compile_pool_from_environment() {
     if (h >= 16) heavy[0] = L'x';
     const bool serial_big = s == 1 && serial[0] != L'0';
     const CompilePool pool = compile_pool(t ? threads : nullptr, h ? heavy : nullptr,
-                                          std::thread::hardware_concurrency(), serial_big);
+                                          process_processors(), serial_big);
     if (!pool.threads_valid) std::fprintf(stderr, "[rt] d3d12: LEONIDA_COMPILE_THREADS is not a number; not used\n");
     if (!pool.heavy_valid) std::fprintf(stderr, "[rt] d3d12: LEONIDA_COMPILE_HEAVY_MAX is not a number; not used\n");
     return pool;
