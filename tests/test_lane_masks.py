@@ -376,6 +376,81 @@ def test_wave32_vcc_hi_isolation():
     assert out_w64 == {}
 
 
+def test_mask_meets_data_at_a_merge():
+    """insert_data_merges: a lane mask that a merge takes as data gets the wave's bits on the way there (the scalar
+    loop over a ballot's lanes: s_and_b64 s[26:27], vcc, exec, then s_ff1 / s_xor of s26 and s_mov_b32 s26 on the
+    back edge). Only where every successor takes it as data and one may still read it."""
+    branches = {"s_branch", "s_cbranch_scc0", "s_cbranch_scc1", "s_endpgm"}
+
+    def bit_loop():
+        return [
+            [ins("v_cmp_eq_u32_e32", sp("vcc"), imm(0), v(4)), ins("s_and_b64", s(26, 2), sp("vcc"), sp("exec")),
+             ins("s_cmp_lg_i32", s(26), imm(0)), ins("s_cbranch_scc0")],                          # 0
+            [ins("s_ff1_i32_b32", s(32), s(26)), ins("s_lshl_b32", s(32), imm(1), s(32)),          # 1: loop header
+             ins("s_xor_b32", s(35), s(32), s(26)), ins("s_cmp_eq_i32", s(26), s(32)), ins("s_cbranch_scc1")],
+            [ins("s_mov_b32", s(26), s(35)), ins("s_branch")],                                      # 2: back edge
+            [ins("s_endpgm")],                                                                     # 3
+        ], [[3, 1], [3, 2], [1], []]
+
+    blocks, succ = bit_loop()
+    # Before: s26 is a mask where block 0 ends and data at the loop header (a number on the back edge).
+    assert masks_at_last(blocks, succ, 0) >= {26}
+    assert 26 not in L.analyse(blocks, succ)[0][id(blocks[1][0])]
+    assert L.insert_data_merges(blocks, succ, branches) == 1
+    marker = blocks[0][-2]
+    assert marker["op"] == L.TO_DATA and marker["args"][0] == s(26) == marker["args"][1]
+    assert L.base_op(blocks[0][-1]["op"]) == "s_cbranch_scc0"          # before the branch
+    # The marker itself still sees the mask (it gathers it) and leaves data behind it.
+    assert 26 in L.analyse(blocks, succ)[0][id(marker)]
+    assert 26 not in L.analyse(blocks, succ)[0][id(blocks[0][-1])]
+    # s27 is a mask at the merge too, but nothing reads it again: no gather for it. Running again adds nothing.
+    assert all(i["args"][0]["r"] != 27 for blk in blocks for i in blk if i["op"] == L.TO_DATA)
+    assert L.insert_data_merges(blocks, succ, branches) == 0
+
+    # A merge that is only read as a mask again (written back to EXEC, ANDed with it, a v_cndmask mask) needs no
+    # gather: this lane's 0 / ~0 already gives bit L there.
+    def diamond(use):
+        # 0 branches to a block that writes a mask to s[6:7] and one that writes data; both go on to `use`.
+        return [[ins("s_cbranch_scc0")],
+                [ins("s_mov_b64", s(6, 2), sp("exec")), ins("s_branch")],
+                [ins("s_mov_b64", s(6, 2), s(20, 2))],
+                [use, ins("s_endpgm")]], [[2, 1], [3], [3], []]
+
+    for use in (ins("s_mov_b64", sp("exec"), s(6, 2)), ins("s_and_b64", s(8, 2), s(6, 2), sp("exec")),
+                ins("v_cndmask_b32_e64", v(1), imm(0), imm(1), s(6, 2))):
+        blocks, succ = diamond(use)
+        assert L.insert_data_merges(blocks, succ, branches) == 0, use["op"]
+    # ... while a scan of its lane bits does, for the register it scans, also through a copy of it.
+    for use in ([ins("s_bcnt1_i32_b32", s(8), s(6))],
+                [ins("s_not_b32", s(9), s(6)), ins("s_ff1_i32_b32", s(8), s(9))]):
+        blocks, succ = diamond(use[0])
+        blocks[3][1:1] = use[1:]
+        assert L.insert_data_merges(blocks, succ, branches) == 1
+        assert [i["args"][0]["r"] for i in blocks[1] if i["op"] == L.TO_DATA] == [6]
+        assert L.base_op(blocks[1][-1]["op"]) == "s_branch"
+        assert L.insert_data_merges(blocks, succ, branches) == 0      # idempotent: the marker leaves data
+    # A 64-bit scan of the whole ballot (s_bcnt1_i32_b64 / s_ff1_i32_b64 of s[6:7]) gathers both halves, so lanes
+    # 32-63 come from s7.
+    for scan in ("s_bcnt1_i32_b64", "s_ff1_i32_b64"):
+        blocks, succ = diamond(ins(scan, s(8), s(6, 2)))
+        assert L.insert_data_merges(blocks, succ, branches) == 2, scan
+        assert [i["args"][0]["r"] for i in blocks[1] if i["op"] == L.TO_DATA] == [6, 7], scan
+        assert L.insert_data_merges(blocks, succ, branches) == 0, scan
+    # Other number reads are left as they were (the gather is kept to the bit scans the compiler's lane loops use).
+    blocks, succ = diamond(ins("s_add_u32", s(8), s(6), imm(1)))
+    assert L.insert_data_merges(blocks, succ, branches) == 0
+
+    # A successor that still reads the register as a mask keeps this lane's bit: nothing is inserted.
+    blocks = [[ins("s_mov_b64", s(6, 2), sp("exec")), ins("s_cbranch_scc0")],
+              [ins("s_mov_b64", sp("exec"), s(6, 2)), ins("s_endpgm")]]
+    assert L.insert_data_merges(blocks, [[1], []], branches) == 0
+    # A mask on both paths to a merge is no data merge.
+    blocks = [[ins("s_mov_b64", s(6, 2), sp("exec")), ins("s_cbranch_scc0")],
+              [ins("s_and_b64", s(6, 2), s(6, 2), sp("vcc"))],
+              [ins("s_bcnt1_i32_b64", s(8), s(6, 2)), ins("s_endpgm")]]
+    assert L.insert_data_merges(blocks, [[2, 1], [2], []], branches) == 0
+
+
 if __name__ == "__main__":
     test_straight_line()
     test_joins()
@@ -387,4 +462,5 @@ if __name__ == "__main__":
     test_writelane_sdwa_dpp_swaps_stores_and_div_scale()
     test_v_and_or_xnor_bfi_track_vector_masks()
     test_wave32_vcc_hi_isolation()
+    test_mask_meets_data_at_a_merge()
     print("ok")

@@ -108,7 +108,7 @@ WAVE32_DUMPS = ("cs_store", "cs_signed_zero_nan", "cs_smem_soffset_imm", "cs_wqm
                 "cs_barrier_divergent", "cs_barrier_early_end", "cs_barrier_loop", "cs_w32_lds_u8_d16", "cs_bpermute32",
                 "cs_w32_lds_subdword", "cs_w32_lds_wide",
                 "cs_w32_partial_scmp", "cs_w32_partial_permute", "cs_exec_const", "cs_w32_mask_imm", "cs_w32_int_ext",
-                "cs_w32_salu64", "cs_w32_misc_ext", "cs_w32_new_ops", "cs_w32_sincos", "cs_lds_b64_cmpst", "cs_lds_xchg64_ext", "cs_lds_atomics_ext", "cs_w32_andn2_exec",
+                "cs_w32_salu64", "cs_w32_misc_ext", "cs_w32_new_ops", "cs_w32_sincos", "cs_lds_b64_cmpst", "cs_lds_xchg64_ext", "cs_lds_atomics_ext", "cs_w32_wrxchg2_ext", "cs_w32_wrxchg2st64", "cs_w32_andn2_exec",
                 "cs_mask_vgpr_exec", "cs_w32_buffer_sub16", "cs_w32_buffer_store_sub", "cs_w32_fcmpswap", "cs_w32_permlane_fi",
                 "cs_w32_exec_computed")
 # Wave32 lane-mask dumps: their EXEC/VCC masks and lane selects cover 32 lanes, so a device whose widest subgroup is
@@ -117,7 +117,7 @@ WAVE32_DUMPS = ("cs_store", "cs_signed_zero_nan", "cs_smem_soffset_imm", "cs_wqm
 # otherwise pick a narrower size and return different words (#774).
 WAVE32_LANE_ENV = {"VKC_SUBGROUP_SIZE": "32"}
 WAVE32_LANE_DUMPS = ("cs_wqm_w32", "cs_w32_lane_wrap", "cs_w32_permute", "cs_bpermute32", "cs_w32_partial_scmp", "cs_w32_partial_permute", "cs_exec_const",
-                     "cs_w32_mask_imm", "cs_lds_b64_cmpst", "cs_lds_xchg64_ext", "cs_lds_atomics_ext", "cs_w32_andn2_exec", "cs_mask_vgpr_exec", "cs_w32_permlane_fi",
+                     "cs_w32_mask_imm", "cs_lds_b64_cmpst", "cs_lds_xchg64_ext", "cs_lds_atomics_ext", "cs_w32_wrxchg2_ext", "cs_w32_wrxchg2st64", "cs_w32_andn2_exec", "cs_mask_vgpr_exec", "cs_w32_permlane_fi",
                      "cs_w32_exec_computed")
 CS_DPP = [("cs_dpp", [1, 0, 3, 2, 5, 4, 7, 6]),
           ("cs_dpp_row", [0, 0, 1, 2, 3, 4, 5, 6]),
@@ -128,7 +128,9 @@ CS_DPP = [("cs_dpp", [1, 0, 3, 2, 5, 4, 7, 6]),
           ("cs_dpp_bank", [0xffffffff, 0xfffffffe, 0xfffffffd, 0xfffffffc, 7, 7, 7, 7]),
           ("cs_dpp_fi", [1, 2, 3, 0x7777, 5, 6, 7, 0x7777]),
           # a VOPC compare with a DPP src0: 1 for the pair compare, 2 for the dpp8 one (cs_dpp_cmp.asm header)
-          ("cs_dpp_cmp", [3, 2, 3, 2, 1, 0, 1, 0])]
+          ("cs_dpp_cmp", [3, 2, 3, 2, 1, 0, 1, 0]),
+          # v_cmpx with a DPP src0: 1 where the plain compare keeps the lane, 2 for the negated one (cs_dpp_cmpx.asm)
+          ("cs_dpp_cmpx", [1, 1, 0, 0, 3, 3, 2, 2])]
 WAVE32_DUMPS += tuple(n for n, _ in CS_DPP)
 WAVE32_LANE_DUMPS += tuple(n for n, _ in CS_DPP)
 CS_DUMPS = [*CS_DPP, ("cs_smem_vcc_base", CS_SMEM_VCC), ("cs_store", CS_STORE), ("cs_smem_soffset_imm", CS_SMEM),
@@ -164,6 +166,12 @@ CS_DUMPS = [*CS_DPP, ("cs_smem_vcc_base", CS_SMEM_VCC), ("cs_store", CS_STORE), 
             # ds_wrxchg*_rtn_b64, ds_or_rtn_b64, ds_min_f32, ds_max_rtn_f32 (cs_lds_xchg64_ext.asm header)
             ("cs_lds_xchg64_ext", [0x11110003, 0x33333333, 0xF00FF000, 0x04030201,
                                0x40302010, 0x70500705, 0x3FC00000, 0x80000000]),
+            # ds_wrxchg2_rtn_b32's pair cases and ds_wrxchg2st64_rtn_b32
+            # (cs_w32_wrxchg2_ext.asm / cs_w32_wrxchg2st64.asm headers)
+            ("cs_w32_wrxchg2_ext", [0x77777777, 0x88880008, 0x99990009, 0xDEADBEEF,
+                                    0xAAAAAAAA, 0xBBBBBBBB, 0x12341234, 0x56785678]),
+            ("cs_w32_wrxchg2st64", [0x33333333, 0x44444444, 0x55550005, 0x66660006,
+                                    0xB0B00084, 0xB0B00088, 0xB0B00140, 0xB0B002C0]),
             # ds_mskor, ds_and/xor_b64, ds_add_rtn_f32, ds_inc/dec/rsub_u32 (cs_lds_atomics_ext.asm header)
             ("cs_lds_atomics_ext", [0xF0F11234, 0xAB34CD78, 0x12345678, 0xF0F00F0F,
                                     0xA5A55A5A, 0x00AA00AA, 0x7FB00000, 0xFE090700]),
@@ -743,6 +751,9 @@ CVT_F32_SAT_CASES = (
 CVT_PK_U8_WORDS = [0x1122330C, 0x11220E44, 0x11003344, 0xFE223344, 0x1122330D, 0x11220044, 0x11FF3344, 0x00223344]
 # v_pk_mul_lo_u16 with a constant operand (cs_pk_mul_lo_const.asm), measured natively on RDNA2 (gfx1036); lanes 0 and 1.
 PK_MUL_LO_WORDS = [0x00009E88, 0x03675433, 0x00230000, 0x00077F6C] * 2
+# Its 32 lanes store 16 bytes each, 128 words: more than the 64 vk_compute_test gives one group by default, so lanes
+# 16-31 wrote past the buffer through its device address (VUID-RuntimeSpirv-PhysicalStorageBuffer64-11819, GPU-AV).
+PK_MUL_LO_ENV = {"VKC_OUT_WORDS": "128"}
 # Wave64-only dump tests (mostly the x = cross-half checks): exact results need 64 lanes, or an emulation of them
 # on narrower subgroups. cs_dpp_w64 is not cross-half, but its lane id needs both halves.
 W64_EMULATED = os.environ.get("LEONIDA_W64_EMULATE") == "1"
@@ -776,7 +787,8 @@ W64X_DUMPS = [("cs_dpp_w64", [1, 0, 3, 2, 5, 4, 7, 6]),
               ("cs_w64x_cmp_sdst", [10240, 6144, 2053, 8224, 7714, 6184, 4144, 5])]
 # A 40-thread group (one partial wave) cannot use --require-wave64 (full subgroups), so it asks for subgroup size 64.
 W64X_PARTIAL = [("cs_w64x_partial", [40, 40, 528, 0, 0, 532, 539, 524820]),
-                ("cs_w64x_partial_scmp", [0, 1, 0, 1, 1, 1, 1, 0])]
+                ("cs_w64x_partial_scmp", [0, 1, 0, 1, 1, 1, 1, 0]),
+                ("cs_w64x_partial_swizzle", [508, 523, 0, 0, 528, 0, 531, 0])]
 PIXEL_BITS = {"ps_clip_color": (0x3e800000, 0x3f000000, 0x3f400000, 0x3f800000),
               # exp mrt0 done (no vm) with every lane on, EXEC off afterwards: written (.asm header, measured on gfx1036)
               "ps_exp_color_mask": (0x40000000, 0x40800000, 0x40000000, 0x40800000),
@@ -1116,7 +1128,7 @@ def fmt_sint32_test(tools, spirv, env=None):
 
 
 def fmt_all_test(tools, spirv, env=None):
-    """cs_fmt_all: 28 loads, the inputs, 15 stores, and the untouched words between (316 words in all). Wave32, one
+    """cs_fmt_all: 32 loads, the inputs, 20 stores, and the untouched words between (336 words in all). Wave32, one
     thread: the translator recorded 32 for it, so the run is pinned to a 32-wide subgroup like compute_test does."""
     env = dict(os.environ if env is None else env)
     env.setdefault("VKC_SUBGROUP_SIZE", str(subgroup_size(spirv, "cs_fmt_all") or 32))
@@ -2255,7 +2267,7 @@ def main():
     results.append(("cs_cvt_pk_u8", compute_test(tools, spirv, "cs_cvt_pk_u8", "1", "dump",
                                                  expected_words=CVT_PK_U8_WORDS)))
     results.append(("cs_pk_mul_lo_const", compute_test(tools, spirv, "cs_pk_mul_lo_const", "1", "dump",
-                                                       expected_words=PK_MUL_LO_WORDS)))
+                                                       expected_words=PK_MUL_LO_WORDS, env=PK_MUL_LO_ENV)))
     for name, want in W64X_DUMPS:   # without --require-wave64 when LEONIDA_W64_EMULATE=1
         results.append((name, compute_test(tools, spirv, name, "1", "dump", require_wave64=not W64_EMULATED,
                                            expected_words=want)))

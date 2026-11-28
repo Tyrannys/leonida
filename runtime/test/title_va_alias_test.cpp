@@ -67,6 +67,77 @@ int main() {
     EXPECT(a.shader_va(title + 0x8000) == title + 0x8000);
     a.remove(title + 0x100000, below);
     EXPECT(a.size() == 0 && a.shader_va(title + 0x100010) == title + 0x100010);
+    // range_of: what a BVH build checks its bytes against (the whole range must lie in one copy), and mappings, the
+    // table a TLAS build translates its instances' BLAS addresses with.
+    std::uint64_t to = 0, room = 0;
+    std::vector<leonida::TitleVaAliases::Mapping> table;
+    a.mappings(table);
+    EXPECT(table.empty() && !a.range_of(title, to, room));
+    EXPECT(a.add(title + 0x40000, size, 0x7000000) && a.add(title, size, arena));
+    EXPECT(a.range_of(title + 0x100, to, room) && to == arena + 0x100 && room == size - 0x100);
+    EXPECT(a.range_of(title + size - 1, to, room) && to == arena + size - 1 && room == 1);
+    EXPECT(!a.range_of(title + size, to, room) && !a.range_of(title - 1, to, room));
+    EXPECT(a.resolve(title + 0x40010, 64, leonida::TitleVaAliases::bvh_address) == 0x7000010);
+    EXPECT(a.translated(leonida::TitleVaAliases::bvh_address) == 1);
+    a.mappings(table);
+    EXPECT(table.size() == 2 && table[0].title_va == title && table[0].end == title + size &&
+           table[0].shader_va == arena && table[1].title_va == title + 0x40000 && table[1].shader_va == 0x7000000);
+    a.remove(title, arena);
+    a.remove(title + 0x40000, 0x7000000);
+    EXPECT(a.size() == 0);
+    // Every listener is told each change as it happens (the console heaps' slot records): an add, the whole old
+    // interval when part of it is replaced, a removal, a copy forgotten and title memory added. None is dropped, however
+    // many come (the 4,096-entry ring this replaced fell back to a full sweep), and a removed listener hears nothing.
+    struct Heard {
+        leonida::TitleVaAliases::Change change;
+        std::uint64_t title_va, bytes, shader_va;
+    };
+    std::vector<Heard> first, second;
+    const auto hear = [](void* to, leonida::TitleVaAliases::Change change, std::uint64_t va, std::uint64_t bytes,
+                         std::uint64_t shader_va) {
+        static_cast<std::vector<Heard>*>(to)->push_back({change, va, bytes, shader_va});
+    };
+    using Change = leonida::TitleVaAliases::Change;
+    a.add_listener(&first, hear);
+    a.add_listener(&second, hear);
+    EXPECT(a.add(title, size, arena));
+    EXPECT(a.add(title + 16, 32, arena + 4096));
+    for (const auto* heard : {&first, &second}) {
+        EXPECT(heard->size() == 3);
+        EXPECT((*heard)[0].change == Change::added && (*heard)[0].title_va == title && (*heard)[0].bytes == size);
+        EXPECT((*heard)[1].change == Change::removed && (*heard)[1].title_va == title && (*heard)[1].bytes == size &&
+               (*heard)[1].shader_va == arena);
+        EXPECT((*heard)[2].change == Change::added && (*heard)[2].title_va == title + 16 &&
+               (*heard)[2].bytes == 32 && (*heard)[2].shader_va == arena + 4096);
+    }
+    a.remove_listener(&second);
+    a.remove(title + 16, arena + 4096);
+    a.forget_copy(title + 0x1000, 0x100, 0x5000000);
+    a.add_title_memory(0x30000000000ull, 0x2000);
+    EXPECT(second.size() == 3 && first.size() == 6);
+    EXPECT(first[3].change == Change::removed && first[3].title_va == title + 16 && first[3].shader_va == arena + 4096);
+    EXPECT(first[4].change == Change::removed && first[4].title_va == title + 0x1000 && first[4].bytes == 0x100 &&
+           first[4].shader_va == 0x5000000);
+    EXPECT(first[5].change == Change::memory_added && first[5].title_va == 0x30000000000ull && first[5].bytes == 0x2000);
+    a.remove_title_memory(0x30000000000ull);
+    for (unsigned i = 0; i < 5000; ++i) a.forget_copy(title, 4, arena);
+    EXPECT(first.size() == 5006);
+    a.remove_listener(&first);
+    // shader_side: whether an address is one the layer wrote for the title (inside some range's copy), so a scan that
+    // sees an already rewritten V# again leaves it alone rather than taking it for an unmapped address.
+    EXPECT(!a.shader_side(arena));
+    EXPECT(a.add(title, size, arena) && a.add_twin(title + 0x200000, title + 0x400000, 0x1000, 0x9000000));
+    EXPECT(a.shader_side(arena) && a.shader_side(arena + size - 1) && !a.shader_side(arena + size));
+    EXPECT(a.shader_side(0x9000fff) && !a.shader_side(0x9001000) && !a.shader_side(title));
+    a.remove(title + 0x200000, 0x9000000);
+    EXPECT(a.shader_side(0x9000000));  // the twin still names it
+    a.remove(title + 0x400000, 0x9000000);
+    EXPECT(!a.shader_side(0x9000000));
+    // A range replaced by an overlapping one leaves the index with the new copy only.
+    EXPECT(a.add(title + 0x100, 0x100, 0xA000000));
+    EXPECT(!a.shader_side(arena) && a.shader_side(0xA0000ff) && !a.shader_side(0xA000100));
+    a.remove(title + 0x100, 0xA000000);
+    EXPECT(a.size() == 0 && !a.shader_side(0xA000000));
     std::printf("title_va_alias: translation inside a title-placed range, identity outside it and after release\n");
     return 0;
 }
