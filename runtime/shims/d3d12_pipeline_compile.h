@@ -391,8 +391,9 @@ public:
             pool_ = compile_pool_from_environment();
             if (pool_->threads > 1)
                 std::fprintf(stderr, "[rt] d3d12: %u pipeline compile workers, at most %u large builds at once "
-                                     "(LEONIDA_COMPILE_THREADS, LEONIDA_COMPILE_HEAVY_MAX)\n",
-                             pool_->threads, pool_->heavy);
+                                     "(LEONIDA_COMPILE_THREADS, LEONIDA_COMPILE_HEAVY_MAX; %u processors for this "
+                                     "process)\n",
+                             pool_->threads, pool_->heavy, process_processors());
         }
         stats_.threads = pool_->threads;
         stats_.heavy = pool_->heavy;
